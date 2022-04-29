@@ -1,0 +1,294 @@
+---
+title: "650 Report R file"
+output: html_notebook
+---
+
+# Import data set 
+imports the 2 data sets that finds the common genes in the two data sets. Forming data table only using the intersect of genes (features) and rbinding the two data sets. 
+```{r}
+library(dplyr)
+
+Pheno <- read.delim("Pheno.txt")
+Expr <- read.delim("Expr.txt")
+
+Pheno1 <- read.delim("Pheno(1).txt")
+Expr1 <- read.delim("Expr(1).txt")
+
+Expr <- t(Expr)
+dt1 <- cbind.data.frame(Expr, Progression = Pheno$Progression)
+
+Expr1 <- t(Expr1)
+dt2 <- cbind.data.frame(Expr1, Progression = Pheno1$Progression)
+
+cols <- intersect(colnames(dt1), colnames(dt2))
+which('Progression' == cols) == length(cols)
+
+dt <- rbind.data.frame(dt1[,cols], dt2[,cols])
+dim(dt)
+
+```
+
+separate progression sampels from non-progression samples
+```{r}
+dt_prog <- dt%>%filter(Progression == 'Progression')
+dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+
+ps <- sort(sample(nrow(dt_prog), nrow(dt_prog)*.7))
+ns <- sort(sample(nrow(dt_non_prog), nrow(dt_non_prog)*.7))
+
+test <- rbind.data.frame(dt_prog[-ps,],dt_non_prog[-ns,])
+train <- rbind.data.frame(dt_prog[ps,],dt_non_prog[ns,])
+
+dt <- train
+dt_prog <- dt%>%filter(Progression == 'Progression')
+dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+
+```
+
+# Explore Key genes using Wilcoxon test
+Generate Wilcoxon test table
+```{r}
+WilcoxPvalTable <- data.frame(NULL)
+for(i in 1:(ncol(dt)-1)){
+  p <- dt_prog[,i]
+  np <- dt_non_prog[,i]
+  name <- colnames(dt)[i]
+  wx <- wilcox.test(p,np)
+  pval <- wx$p.value
+  add <- data.frame(gene = name, pval = pval)
+  WilcoxPvalTable <- rbind.data.frame(WilcoxPvalTable, add)
+}
+
+hist(WilcoxPvalTable$pval, breaks = 50, xlab = 'p-Values', main = 'Histogram of Wilcoxon test p-values', col = rgb(0,0,1,1/4))
+
+WilcoxPvalTable <- WilcoxPvalTable%>%arrange(pval)
+```
+
+
+Inspect expression level histogram
+```{r}
+test_col <- 'PSRC1'
+wilcox.test(dt_prog[,test_col], dt_non_prog[,test_col])
+p1 <- hist(dt_non_prog[,test_col])
+p2 <- hist(dt_prog[,test_col])
+plot( p1, col=rgb(0,0,1,1/4), main = test_col, xlab = 'Expression Level')  
+plot( p2, col=rgb(1,0,0,1/4), add=T)
+legend("topright", legend=c("non-Progression", "Progression"),
+       col=c(rgb(0,0,1,1/4), rgb(1,0,0,1/4)), fill=c(rgb(0,0,1,1/4), rgb(1,0,0,1/4)), cex=0.8)
+```
+
+# Explore Key genes with GWAS
+change to categorical data, over/normal/under expressed decided by Q13 values of non-progression set
+```{r}
+dt_cat <- dt
+for(i in 1:(ncol(dt)-1)){
+  Q <- quantile(dt_non_prog[,i])
+  dt_cat[dt[,i] < Q[2],i] <- 'U'
+  dt_cat[dt[,i] >= Q[2],i] <- 'N'
+  dt_cat[dt[,i] > Q[4],i] <- 'O'
+}
+
+dt_prog_cat <- dt_cat%>%filter(Progression == 'Progression')
+dt_non_prog_cat <- dt_cat%>%filter(Progression == 'NoProgression')
+```
+
+
+perform GWAS of categorized data
+```{r}
+Gt_prog <- data.frame(NULL)
+for(i in 1:(ncol(dt)-1)){
+  add <- table(dt_prog_cat[,i])
+  Gt_prog <- rbind.data.frame(Gt_prog, add)
+}
+rownames(Gt_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+colnames(Gt_prog) <- c('N','O','U')
+
+Gt_non_prog <- data.frame(NULL)
+for(i in 1:(ncol(dt)-1)){
+  add <- table(dt_non_prog_cat[,i])
+  Gt_non_prog <- rbind.data.frame(Gt_non_prog, add)
+}
+rownames(Gt_non_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+colnames(Gt_non_prog) <- c('N','O','U')
+
+GWAS <- data.frame(NULL)
+for(i in 1:(ncol(dt)-1)){
+  for(j in c('N','O','U')){
+    freq_p <- Gt_prog[i,j]
+    freq_n <- Gt_non_prog[i,j]
+    add <- data.frame(prog = freq_p, nonprog = freq_n)
+    rownames(add) <- paste(j, '_', colnames(dt)[i], sep = "")
+    GWAS <- rbind.data.frame(GWAS, add)
+  }
+}
+
+GWAS <- t(GWAS)
+dim(GWAS)
+
+GWAS_pval <- GWAS
+options(warn = -1)
+for(j in 1:ncol(GWAS)){
+  r <- which(rownames(GWAS) == rownames(GWAS)[1])
+  c <- which(colnames(GWAS) == colnames(GWAS)[j])
+  caseF <- GWAS[r,c]/sum(GWAS[-r,c])
+  controlF <- sum(GWAS[r,-c])/sum(GWAS[-r,-c])
+  odds <- caseF/controlF
+  chiPval <- chisq.test(c(odds,1))
+  GWAS_pval[1,j] <- chiPval$p.value
+}
+
+Glp <- -log(GWAS_pval[1,])
+plot(Glp, col = 'blue', pch = 16, main = 'Manhattan plot', ylab = '-logPval')
+hist(GWAS_pval[1,], breaks = 50, xlab = 'p-Values', main = 'Histogram of GWAS p-values', col =rgb(1,0,0,1/4))
+```
+
+Compare Wilcoxon and GWAS selection results
+```{r}
+Glp <- sort(Glp, decreasing = TRUE)
+
+rank_sum <- 0
+top100 <- c()
+for(i in 1:100){
+  gene <- names(Glp)[i]
+  gene <- strsplit(gene, '_')[[1]][2]
+  rank <- which(gene == WilcoxPvalTable$gene)
+  rank_sum <- rank_sum + rank
+  top100 <- c(top100, gene)
+}
+rank_sum/100
+```
+
+Inspect GWAS results
+```{r}
+test_col <- 'ALOX5'#strsplit(names(Glp)[1], '_')[[1]][2]
+wilcox.test(dt_prog[,test_col], dt_non_prog[,test_col])
+p1 <- hist(dt_non_prog[,test_col])
+p2 <- hist(dt_prog[,test_col])
+plot( p1, col=rgb(0,0,1,1/4), main = colnames(dt)[test_col], xlab = 'Expression Level')  
+plot( p2, col=rgb(1,0,0,1/4), add=T)
+
+t.test(dt_non_prog[,test_col],dt_prog[,test_col])
+#legend("topright", legend=c("non-Progression", "Progression"),
+#       col=c(rgb(0,0,1,1/4), rgb(1,0,0,1/4)), fill=c(rgb(0,0,1,1/4), rgb(1,0,0,1/4)), cex=0.8)
+```
+
+# Random forest training
+Random forest training with GWAS top100 features
+```{r}
+train_cat <- train
+for(i in 1:(ncol(dt)-1)){
+  Q <- quantile(dt_non_prog[,i])
+  train_cat[train[,i] < Q[2],i] <- 'U'
+  train_cat[train[,i] >= Q[2],i] <- 'N'
+  train_cat[train[,i] > Q[4],i] <- 'O'
+}
+
+test_cat <- test
+for(i in 1:(ncol(dt)-1)){
+  Q <- quantile(dt_non_prog[,i])
+  test_cat[test[,i] < Q[2],i] <- 'U'
+  test_cat[test[,i] >= Q[2],i] <- 'N'
+  test_cat[test[,i] > Q[4],i] <- 'O'
+}
+
+dt_cat <- train_cat[,c(top100, 'Progression')]
+dt_cat$Progression <- as.factor(dt_cat$Progression)
+test_cat <- test_cat[,c(top100, 'Progression')]
+test_cat$Progression <- as.factor(test_cat$Progression)
+
+rf <- randomForest::randomForest(Progression~., data=dt_cat)
+```
+
+draw roc curve 
+```{r}
+predictions <- as.data.frame(predict(rf, test_cat, type = "prob"))
+predictions <- predictions$Progression
+label <- as.numeric(test_cat$Progression)-1
+precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+plot(precrec_obj)
+t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+t2 <- which(precrec_obj$rocs[[1]]$y < 0.9)
+t <- intersect(t1,t2)
+spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+```
+Inspect features
+```{r}
+gene_imp <- as.data.frame(rf$importance)
+gene_imp <- gene_imp%>%arrange(desc(MeanDecreaseGini))
+```
+
+# Nerual network training
+TrainTest processing
+```{r}
+nn_train <- train[,c(top100, 'Progression')]
+nn_test <- test[,c(top100, 'Progression')]
+nn_train$Progression <- as.factor(nn_train$Progression)
+nn_test$Progression <- as.factor(nn_test$Progression)
+nn_train$Progression <- as.numeric(nn_train$Progression)-1
+nn_test$Progression <- as.numeric(nn_test$Progression)-1
+```
+
+4-fold CV for architecture
+```{r}
+nn_train_prog <- nn_train%>%filter(Progression == 1)
+nn_train_non_prog <- nn_train%>%filter(Progression == 0)
+
+
+arch_search <- data.frame(NULL)
+for(i in 1:3){
+  for(j in 1:100){
+  sum1 <- 0
+  sum2 <- 0
+    for(k in 1:20){
+      ps <- sort(sample(nrow(nn_train_prog), nrow(nn_train_prog)*.75))
+      ns <- sort(sample(nrow(nn_train_non_prog), nrow(nn_train_non_prog)*.75))
+      
+      nn_test_cv <- rbind.data.frame(nn_train_prog[-ps,],nn_train_non_prog[-ns,])
+      nn_train_cv <- rbind.data.frame(nn_train_prog[ps,],nn_train_non_prog[ns,])
+      
+      nn <- neuralnet::neuralnet(Progression~.,data=nn_train_cv, hidden=rep(j,i), act.fct = "logistic",
+                      linear.output = FALSE)
+      
+      Predict <- neuralnet::compute(nn,nn_test_cv)
+      prob <- Predict$net.result
+      precrec_obj <- precrec::evalmod(scores = prob, labels = nn_test_cv$Progression)
+      t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+      t2 <- which(precrec_obj$rocs[[1]]$y < 0.9)
+      t <- intersect(t1,t2)
+      spec80 <- 1 - mean(precrec_obj$rocs[[1]]$x[t])
+      auc <- attr(precrec_obj$rocs[[1]],'auc')
+      sum1 <- auc + sum1
+      sum2 <- spec80 + sum2
+    }
+  auc <- sum1/20
+  spec <- sum2/20
+  add <- data.frame(layer = i, nodes = j, spec80 = spec, auc = auc)
+  arch_search <- rbind.data.frame(arch_search, add)
+  print(paste(j, ' of ',i ,sep = ''))
+  }
+}
+
+
+```
+
+Construct optimum NN
+```{r}
+arch_search <- arch_search%>%arrange(desc(spec80))
+nn <- neuralnet::neuralnet(Progression~.,data=nn_train, hidden=c(60,60,30), act.fct = "logistic",
+                linear.output = FALSE)
+
+Predict <- neuralnet::compute(nn,nn_test)
+prob <- Predict$net.result
+precrec_obj <- precrec::evalmod(scores = prob, labels = nn_test$Progression)
+t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+t2 <- which(precrec_obj$rocs[[1]]$y < 0.9)
+t <- intersect(t1,t2)
+spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+auc <- attr(precrec_obj$rocs[[1]],'auc')
+plot(precrec_obj)
+spec80
+auc
+
+```
+
+

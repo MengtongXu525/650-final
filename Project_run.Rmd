@@ -1,0 +1,728 @@
+---
+title: "Project working code"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+
+Pheno <- read.delim("Pheno.txt")
+Expr <- read.delim("Expr.txt")
+
+Pheno1 <- read.delim("Pheno(1).txt")
+Expr1 <- read.delim("Expr(1).txt")
+
+Expr <- t(Expr)
+dt1 <- cbind.data.frame(Expr, Progression = Pheno$Progression)
+
+Expr1 <- t(Expr1)
+dt2 <- cbind.data.frame(Expr1, Progression = Pheno1$Progression)
+
+cols <- intersect(colnames(dt1), colnames(dt2))
+which('Progression' == cols) == length(cols)
+
+dt <- rbind.data.frame(dt1[,cols], dt2[,cols])
+dim(dt)
+```
+cycles to test 
+```{r}
+wilcoxRank <- data.frame(NULL)
+GWASRank <- data.frame(NULL)
+wilcoxGWASRMSD <- c()
+GWASwilcoxRMSD <- c()
+baselineRMSD <- c()
+Performance <- data.frame(NULL)
+
+for(cycle in 1:1000){
+  tryCatch({
+    dt_prog <- dt%>%filter(Progression == 'Progression')
+    dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+    
+    ps <- sort(sample(nrow(dt_prog), nrow(dt_prog)*.75))
+    ns <- sort(sample(nrow(dt_non_prog), nrow(dt_non_prog)*.75))
+    
+    test <- rbind.data.frame(dt_prog[-ps,],dt_non_prog[-ns,])
+    train <- rbind.data.frame(dt_prog[ps,],dt_non_prog[ns,])
+    dt_prog <- train%>%filter(Progression == 'Progression')
+    dt_non_prog <- train%>%filter(Progression == 'NoProgression')
+    
+    #wilcoxon 
+    WilcoxPvalTable <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      p <- dt_prog[,i]
+      np <- dt_non_prog[,i]
+      name <- colnames(dt)[i]
+      wx <- wilcox.test(p,np)
+      pval <- wx$p.value
+      add <- data.frame(gene = name, pval = pval)
+      WilcoxPvalTable <- rbind.data.frame(WilcoxPvalTable, add)
+    }
+    WilcoxPvalTable <- WilcoxPvalTable%>%arrange(pval)
+    WilcoxRank_temp <- WilcoxPvalTable
+    for(i in 1:nrow(WilcoxPvalTable)){
+      WilcoxRank_temp$pval[i] <- i
+    }
+    Wilcoxadd <- t(WilcoxRank_temp$pval)
+    colnames(Wilcoxadd) <- WilcoxPvalTable$gene
+    Wilcoxadd <- as.data.frame(Wilcoxadd)
+    wilcoxRank <- rbind(wilcoxRank, as.data.frame(Wilcoxadd))
+    
+    #GWAS
+    dt_cat <- train
+    for(i in 1:(ncol(dt_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      dt_cat[train[,i] < Q[2],i] <- 'U'
+      dt_cat[train[,i] >= Q[2],i] <- 'N'
+      dt_cat[train[,i] > Q[4],i] <- 'O'
+    }
+    
+    dt_prog_cat <- dt_cat%>%filter(Progression == 'Progression')
+    dt_non_prog_cat <- dt_cat%>%filter(Progression == 'NoProgression')
+    
+    Gt_prog <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      add <- table(dt_prog_cat[,i])
+      Gt_prog <- rbind.data.frame(Gt_prog, add)
+    }
+    rownames(Gt_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+    colnames(Gt_prog) <- c('N','O','U')
+    
+    Gt_non_prog <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      add <- table(dt_non_prog_cat[,i])
+      Gt_non_prog <- rbind.data.frame(Gt_non_prog, add)
+    }
+    rownames(Gt_non_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+    colnames(Gt_non_prog) <- c('N','O','U')
+    
+    GWAS <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      for(j in c('N','O','U')){
+        freq_p <- Gt_prog[i,j]
+        freq_n <- Gt_non_prog[i,j]
+        add <- data.frame(prog = freq_p, nonprog = freq_n)
+        rownames(add) <- paste(j, '_', colnames(dt)[i], sep = "")
+        GWAS <- rbind.data.frame(GWAS, add)
+      }
+    }
+    
+    GWAS <- t(GWAS)
+    dim(GWAS)
+    
+    GWAS_pval <- GWAS
+    for(j in 1:ncol(GWAS)){
+      r <- which(rownames(GWAS) == rownames(GWAS)[1])
+      c <- which(colnames(GWAS) == colnames(GWAS)[j])
+      caseF <- GWAS[r,c]/sum(GWAS[-r,c])
+      controlF <- sum(GWAS[r,-c])/sum(GWAS[-r,-c])
+      odds <- caseF/controlF
+      suppressWarnings({
+        chiPval <- chisq.test(c(odds,1))
+      })
+      GWAS_pval[1,j] <- chiPval$p.value
+    }
+    Glp <- -log(GWAS_pval[1,])
+    Glp <- sort(Glp, decreasing = TRUE)
+    Glp <- Glp[substr(names(Glp),1,1) != 'N']
+    names <- substr(names(Glp), 3,nchar(names(Glp)))
+    GWASrank_temp <- data.frame(gene = names, pval = Glp)
+    GWASRank_add <- c()
+    for(i in 1:nrow(GWASrank_temp)){
+      if(length(which(GWASrank_temp$gene[i] == GWASRank_add)) == 0){
+        GWASRank_add <- c(GWASRank_add, GWASrank_temp$gene[i])
+      }
+    }
+    GWAS_add <- data.frame(gene = GWASRank_add, rank = 1:length(GWASRank_add))
+    GWASadd <- t(GWAS_add$rank)
+    colnames(GWASadd) <- GWAS_add$gene
+    GWASRank <- rbind.data.frame(GWASRank, GWASadd)
+    
+    #get rmsd
+    wilcoxadd <- data.frame(gene = names(Wilcoxadd), pval = as.numeric(Wilcoxadd))
+    wilcoxtop <- wilcoxadd$gene[1:100]
+    GWAStop <- GWAS_add$gene[1:100]
+    rownames(wilcoxadd) <- wilcoxadd$gene
+    rownames(GWAS_add) <- GWAS_add$gene
+    WG <- wilcoxadd[GWAStop,'pval']
+    GW <- GWAS_add[wilcoxtop, 'rank']
+    rand <- sample(nrow(GWAS_add), 100)
+    GWASwilcoxRMSD <- c(GWASwilcoxRMSD, bio3d::rmsd(WG, 1:100))
+    wilcoxGWASRMSD <- c(wilcoxGWASRMSD, bio3d::rmsd(GW, 1:100))
+    baselineRMSD <- c(baselineRMSD, bio3d::rmsd(rand, 1:100))
+    
+    #wilcox machine learnings
+    train_w <- train[,c(wilcoxtop, 'Progression')]
+    test_w <- test[,c(wilcoxtop, 'Progression')]
+    train_w$Progression <- as.factor(train_w$Progression)
+    test_w$Progression <- as.factor(test_w$Progression)
+    train_w$Progression <- as.numeric(train_w$Progression)-1
+    test_w$Progression <- as.numeric(test_w$Progression)-1
+    #NN
+    nn <- neuralnet::neuralnet(Progression~.,data=train_w, hidden=c(60,60,30), act.fct = "logistic",
+                  linear.output = FALSE)
+  
+    Predict <- neuralnet::compute(nn,test_w)
+    prob <- Predict$net.result
+    precrec_obj <- precrec::evalmod(scores = prob, labels = test_w$Progression)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    auc <- attr(precrec_obj$rocs[[1]],'auc')
+    nn_W_spec80 <- spec80
+    nn_W_auc <- auc
+    
+    #random forest
+    train_w <- train[,c(wilcoxtop, 'Progression')]
+    test_w <- test[,c(wilcoxtop, 'Progression')]
+    train_w$Progression <- as.factor(train_w$Progression)
+    test_w$Progression <- as.factor(test_w$Progression)
+    rf <-randomForest::randomForest(Progression~.,data=train_w)
+    predictions <- as.data.frame(predict(rf, test_w, type = "prob"))
+    predictions <- predictions$Progression
+    label <- as.numeric(test_w$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    rf_W_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    rf_W_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    #adaboost
+    rf <-adabag::boosting(Progression~.,data=train_w)
+    predictions <- adabag::predict.boosting(rf, test_w)
+    predictions <- predictions$prob[,2]
+    label <- as.numeric(test_w$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    ab_W_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    ab_W_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    #linear regression
+    train_w <- train[,c(wilcoxtop, 'Progression')]
+    test_w <- test[,c(wilcoxtop, 'Progression')]
+    train_w$Progression <- as.factor(train_w$Progression)
+    test_w$Progression <- as.factor(test_w$Progression)
+    train_w$Progression <- as.numeric(train_w$Progression)-1
+    test_w$Progression <- as.numeric(test_w$Progression)-1
+    
+    lm <- lm(Progression~.,data=train_w)
+    predictions <- as.data.frame(predict(lm, test_w))
+    label <- as.numeric(test_w$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    lm_W_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    lm_W_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    #GWAS machine learning
+    train_cat <- train
+    for(i in 1:(ncol(train_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      train_cat[train[,i] < Q[2],i] <- 'U'
+      train_cat[train[,i] >= Q[2],i] <- 'N'
+      train_cat[train[,i] > Q[4],i] <- 'O'
+    }
+    test_cat <- test
+    for(i in 1:(ncol(test_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      test_cat[test[,i] < Q[2],i] <- 'U'
+      test_cat[test[,i] >= Q[2],i] <- 'N'
+      test_cat[test[,i] > Q[4],i] <- 'O'
+    }
+    
+    train_G <- train_cat[,c(wilcoxtop, 'Progression')]
+    test_G <- test_cat[,c(wilcoxtop, 'Progression')]
+    train_G$Progression <- as.factor(train_G$Progression)
+    test_G$Progression <- as.factor(test_G$Progression)
+    
+    #random forest
+    rf <- randomForest::randomForest(Progression~., data=train_G)
+    predictions <- as.data.frame(predict(rf, test_G, type = "prob"))
+    predictions <- predictions$Progression
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    rf_G_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    rf_G_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    #adaboost
+    train_G <- as.data.frame(lapply(train_G[colnames(train_G)], factor))
+    test_G <- as.data.frame(lapply(test_G[colnames(test_G)], factor))
+    rf <-adabag::boosting(Progression~.,data=train_G)
+    predictions <- adabag::predict.boosting(rf, test_G)
+    predictions <- predictions$prob[,2]
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    ab_G_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    ab_G_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    add_performance <- data.frame(nn_W_auc, nn_W_spec80, rf_W_auc, rf_W_spec80, ab_W_auc, ab_W_spec80, lm_W_auc, lm_W_spec80, rf_G_auc, rf_G_spec80, ab_G_auc, ab_G_spec80)
+    Performance <- rbind.data.frame(Performance, add_performance)
+    print(cycle)
+  }, error = function(e) e)
+  #traintest
+}
+
+
+```
+inspect output
+```{r}
+wilcoxRankTotal <- wilcoxRank[1,]
+for(i in colnames(wilcoxRank)){
+  wilcoxRankTotal[1,i] <- mean(wilcoxRank[,i])
+}
+wilcoxRankTotal <- data.frame(gene = names(wilcoxRankTotal), rank = t(wilcoxRankTotal))
+wilcoxRankTotal <- wilcoxRankTotal%>%arrange(X1)
+
+GWASRankTotal <- GWASRank[1,]
+for(i in colnames(GWASRank)){
+  GWASRankTotal[1,i] <- mean(GWASRank[,i])
+}
+GWASRankTotal <- data.frame(gene = names(GWASRankTotal), rank = t(GWASRankTotal))
+GWASRankTotal <- GWASRankTotal%>%arrange(X1)
+
+mean(wilcoxGWASRMSD)
+sd(wilcoxGWASRMSD)
+mean(GWASwilcoxRMSD)
+sd(GWASwilcoxRMSD)
+mean(baselineRMSD)
+sd(baselineRMSD)
+
+
+Performance
+PerformanceTotal <- Performance[1:2,]
+for(i in colnames(Performance)){
+  PerformanceTotal[1,i] <- mean(Performance[,i])
+  PerformanceTotal[2,i] <- sd(Performance[,i])
+}
+PerformanceTotal <- data.frame(gene = names(PerformanceTotal), rank = t(PerformanceTotal))
+PerformanceTotal <- PerformanceTotal%>%arrange(desc(rank.1))
+```
+
+assessing feature ranking 
+```{r}
+library(ggplot2)
+library(ggsignif)
+ranks <- rbind.data.frame(data.frame(name = 'wilcoxGWASRMSD', value = wilcoxGWASRMSD), data.frame(name = 'GWASwilcoxRMSD', value = GWASwilcoxRMSD), data.frame(name = 'baselineRMSD', value = baselineRMSD))
+
+ranks <- data.frame(name = c('wilcoxGWASRMSD', 'GWASwilcoxRMSD', 'baselineRMSD'),
+                    mean = c(mean(wilcoxGWASRMSD), mean(GWASwilcoxRMSD),mean(baselineRMSD)),
+                    sd = c(sd(wilcoxGWASRMSD), sd(GWASwilcoxRMSD),sd(baselineRMSD)))
+
+ggplot(ranks) +
+    geom_bar( aes(x=name, y=mean), stat="identity", fill='skyblue', alpha=0.7) +
+    geom_errorbar( aes(x=name, ymin=mean-sd, ymax=mean+sd), width=0.4, colour='orange', alpha=0.9, size=1) +
+    geom_signif(comparisons = list(c("wilcoxGWASRMSD", "GWASwilcoxRMSD")), 
+              map_signif_level=TRUE)
+
+ggplot(ranks, aes(x=name, y=value)) + 
+  geom_boxplot() +
+  geom_signif(comparisons = list(c("wilcoxGWASRMSD", "GWASwilcoxRMSD")), 
+              map_signif_level=TRUE) + 
+  geom_signif(comparisons = list(c("baselineRMSD", "GWASwilcoxRMSD")), 
+              map_signif_level=TRUE)
+  
+dat <- data.frame(models = substr(PerformanceTotal$gene,1,4),
+              Sub   = c(rep('AUC',6),rep('specificity80',6)),
+              mean = PerformanceTotal$rank.1,
+              sd = PerformanceTotal$rank.2)  
+
+ggplot(dat, aes(models, mean)) +
+  geom_bar(aes(fill = Sub), stat="identity", position="dodge", width=.5) +
+  scale_fill_manual(values = c("grey80", "grey20"))
+```
+
+double rf model 
+```{r}
+Eval <- data.frame(NULL)
+for(cycle in 1:1000){
+  tryCatch({
+    dt_prog <- dt%>%filter(Progression == 'Progression')
+    dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+    
+    ps <- sort(sample(nrow(dt_prog), nrow(dt_prog)*.75))
+    ns <- sort(sample(nrow(dt_non_prog), nrow(dt_non_prog)*.75))
+    
+    test <- rbind.data.frame(dt_prog[-ps,],dt_non_prog[-ns,])
+    train <- rbind.data.frame(dt_prog[ps,],dt_non_prog[ns,])
+    dt_prog <- train%>%filter(Progression == 'Progression')
+    dt_non_prog <- train%>%filter(Progression == 'NoProgression')
+    
+    #wilcoxon 
+    WilcoxPvalTable <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      p <- dt_prog[,i]
+      np <- dt_non_prog[,i]
+      name <- colnames(dt)[i]
+      wx <- wilcox.test(p,np)
+      pval <- wx$p.value
+      add <- data.frame(gene = name, pval = pval)
+      WilcoxPvalTable <- rbind.data.frame(WilcoxPvalTable, add)
+    }
+    WilcoxPvalTable <- WilcoxPvalTable%>%arrange(pval)
+    WilcoxRank_temp <- WilcoxPvalTable
+    for(i in 1:nrow(WilcoxPvalTable)){
+      WilcoxRank_temp$pval[i] <- i
+    }
+    Wilcoxadd <- t(WilcoxRank_temp$pval)
+    colnames(Wilcoxadd) <- WilcoxPvalTable$gene
+    Wilcoxadd <- as.data.frame(Wilcoxadd)
+    
+    #GWAS
+    dt_cat <- train
+    for(i in 1:(ncol(dt_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      dt_cat[train[,i] < Q[2],i] <- 'U'
+      dt_cat[train[,i] >= Q[2],i] <- 'N'
+      dt_cat[train[,i] > Q[4],i] <- 'O'
+    }
+    
+    dt_prog_cat <- dt_cat%>%filter(Progression == 'Progression')
+    dt_non_prog_cat <- dt_cat%>%filter(Progression == 'NoProgression')
+    
+    Gt_prog <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      add <- table(dt_prog_cat[,i])
+      Gt_prog <- rbind.data.frame(Gt_prog, add)
+    }
+    rownames(Gt_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+    colnames(Gt_prog) <- c('N','O','U')
+    
+    Gt_non_prog <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      add <- table(dt_non_prog_cat[,i])
+      Gt_non_prog <- rbind.data.frame(Gt_non_prog, add)
+    }
+    rownames(Gt_non_prog) <- colnames(dt)[1:(ncol(dt)-1)]
+    colnames(Gt_non_prog) <- c('N','O','U')
+    
+    GWAS <- data.frame(NULL)
+    for(i in 1:(ncol(dt)-1)){
+      for(j in c('N','O','U')){
+        freq_p <- Gt_prog[i,j]
+        freq_n <- Gt_non_prog[i,j]
+        add <- data.frame(prog = freq_p, nonprog = freq_n)
+        rownames(add) <- paste(j, '_', colnames(dt)[i], sep = "")
+        GWAS <- rbind.data.frame(GWAS, add)
+      }
+    }
+    
+    GWAS <- t(GWAS)
+    dim(GWAS)
+    
+    GWAS_pval <- GWAS
+    for(j in 1:ncol(GWAS)){
+      r <- which(rownames(GWAS) == rownames(GWAS)[1])
+      c <- which(colnames(GWAS) == colnames(GWAS)[j])
+      caseF <- GWAS[r,c]/sum(GWAS[-r,c])
+      controlF <- sum(GWAS[r,-c])/sum(GWAS[-r,-c])
+      odds <- caseF/controlF
+      suppressWarnings({
+        chiPval <- chisq.test(c(odds,1))
+      })
+      GWAS_pval[1,j] <- chiPval$p.value
+    }
+    Glp <- -log(GWAS_pval[1,])
+    Glp <- sort(Glp, decreasing = TRUE)
+    Glp <- Glp[substr(names(Glp),1,1) != 'N']
+    names <- substr(names(Glp), 3,nchar(names(Glp)))
+    GWASrank_temp <- data.frame(gene = names, pval = Glp)
+    GWASRank_add <- c()
+    for(i in 1:nrow(GWASrank_temp)){
+      if(length(which(GWASrank_temp$gene[i] == GWASRank_add)) == 0){
+        GWASRank_add <- c(GWASRank_add, GWASrank_temp$gene[i])
+      }
+    }
+    GWAS_add <- data.frame(gene = GWASRank_add, rank = 1:length(GWASRank_add))
+    GWASadd <- t(GWAS_add$rank)
+    colnames(GWASadd) <- GWAS_add$gene
+    
+    
+    #random forest
+    train_w <- train[,c(wilcoxtop, 'Progression')]
+    test_w <- test[,c(wilcoxtop, 'Progression')]
+    train_w$Progression <- as.factor(train_w$Progression)
+    test_w$Progression <- as.factor(test_w$Progression)
+    rf <-randomForest::randomForest(Progression~.,data=train_w)
+    predictions <- as.data.frame(predict(rf, test_w, type = "prob"))
+    predictions_W <- predictions$Progression
+    
+    
+    #GWAS machine learning
+    train_cat <- train
+    for(i in 1:(ncol(train_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      train_cat[train[,i] < Q[2],i] <- 'U'
+      train_cat[train[,i] >= Q[2],i] <- 'N'
+      train_cat[train[,i] > Q[4],i] <- 'O'
+    }
+    test_cat <- test
+    for(i in 1:(ncol(test_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      test_cat[test[,i] < Q[2],i] <- 'U'
+      test_cat[test[,i] >= Q[2],i] <- 'N'
+      test_cat[test[,i] > Q[4],i] <- 'O'
+    }
+    
+    train_G <- train_cat[,c(wilcoxtop, 'Progression')]
+    test_G <- test_cat[,c(wilcoxtop, 'Progression')]
+    train_G$Progression <- as.factor(train_G$Progression)
+    test_G$Progression <- as.factor(test_G$Progression)
+    
+    #random forest
+    rf <- randomForest::randomForest(Progression~., data=train_G)
+    predictions <- as.data.frame(predict(rf, test_G, type = "prob"))
+    predictions_G <- predictions$Progression
+    
+    
+    
+    
+    predictions <- predictions_W
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    W_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    W_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    predictions <- predictions_G
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    plot(precrec_obj)
+    G_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    G_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    predictions <- predictions_W
+    for(i in length(predictions_G)){
+      predictions[i] <- max(predictions_G[i], predictions_W[i])
+    }
+    
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    max_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    max_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    predictions <- predictions_W
+    for(i in length(predictions_G)){
+      predictions[i] <- min(predictions_G[i], predictions_W[i])
+    }
+    
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    min_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    min_auc <- attr(precrec_obj$rocs[[1]],'auc')
+
+    predictions <- predictions_W
+    for(i in length(predictions_G)){
+      predictions[i] <- mean(predictions_G[i], predictions_W[i])
+    }
+    
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.8)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    mean_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    mean_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    
+    add <- data.frame(G_spec80, G_auc, W_spec80, W_auc, max_spec80, max_auc, min_spec80, min_auc, mean_spec80, mean_auc)
+    Eval <- rbind.data.frame(Eval, add)
+    
+    print(cycle)
+  }, error = function(e) e)
+  #traintest
+}
+
+```
+evaluate double model
+```{r}
+meanEval <- c()
+for(i in colnames(Eval)){
+  meanEval <- c(meanEval, mean(Eval[,i]))
+}
+names(meanEval) <- colnames(Eval)
+```
+
+feature inspection
+```{r}
+wilcoxRank
+GWASRank
+
+Performance
+
+wilcoxRank_weighted <- wilcoxRank
+for(i in 1:nrow(wilcoxRank)){
+  wilcoxRank_weighted[i,] <- wilcoxRank[i,]*Performance$rf_W_spec80[i]
+  print(i)
+}
+
+GWASRank_weighted <- GWASRank
+for(i in 1:nrow(GWASRank)){
+  GWASRank_weighted[i,] <- GWASRank[i,]*Performance$rf_W_spec80[i]
+  print(i)
+}
+
+wilcoxRank_weighted <- wilcoxRank_weighted[-is.na(wilcoxRank_weighted),]
+meanW <- c()
+for(i in colnames(wilcoxRank_weighted)){
+  meanW <- c(meanW, mean(wilcoxRank_weighted[-nrow(wilcoxRank_weighted),i]))
+}
+names(meanW) <- colnames(wilcoxRank_weighted)
+
+GWASRank_weighted <- GWASRank_weighted[-is.na(GWASRank_weighted),]
+meanG <- c()
+for(i in colnames(GWASRank_weighted)){
+  meanG <- c(meanG, mean(GWASRank_weighted[-nrow(GWASRank_weighted),i]))
+}
+names(meanG) <- colnames(GWASRank_weighted)
+
+W_rank <- data.frame(gene = names(meanW), rank = meanW)
+G_rank <- data.frame(gene = names(meanG), rank = meanG)
+
+W_rank <- W_rank%>%arrange(rank)
+G_rank <- G_rank%>%arrange(rank)
+w_rank
+G_rank
+
+```
+
+5-gene expression prediction
+```{r}
+Eval5 <- data.frame(NULL)
+for(cycle in 1:1000){
+  tryCatch({
+    dt_prog <- dt%>%filter(Progression == 'Progression')
+    dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+    
+    ps <- sort(sample(nrow(dt_prog), nrow(dt_prog)*.75))
+    ns <- sort(sample(nrow(dt_non_prog), nrow(dt_non_prog)*.75))
+    
+    test <- rbind.data.frame(dt_prog[-ps,],dt_non_prog[-ns,])
+    train <- rbind.data.frame(dt_prog[ps,],dt_non_prog[ns,])
+    dt_prog <- train%>%filter(Progression == 'Progression')
+    dt_non_prog <- train%>%filter(Progression == 'NoProgression')
+    
+    
+    #random forest
+    train_w <- train[,c(wilcoxtop, 'Progression')]
+    test_w <- test[,c(wilcoxtop, 'Progression')]
+    train_w$Progression <- as.factor(train_w$Progression)
+    test_w$Progression <- as.factor(test_w$Progression)
+    train_w <- train_w[,c(W_rank$gene[1:5],'Progression')]
+    test_w <- test_w[,c(W_rank$gene[1:5],'Progression')]
+    rf <-randomForest::randomForest(Progression~.,data=train_w)
+    predictions <- as.data.frame(predict(rf, test_w, type = "prob"))
+    predictions_W <- predictions$Progression
+    
+    
+    #GWAS machine learning
+    train_cat <- train
+    for(i in 1:(ncol(train_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      train_cat[train[,i] < Q[2],i] <- 'U'
+      train_cat[train[,i] >= Q[2],i] <- 'N'
+      train_cat[train[,i] > Q[4],i] <- 'O'
+    }
+    test_cat <- test
+    for(i in 1:(ncol(test_cat)-1)){
+      Q <- quantile(dt_non_prog[,i])
+      test_cat[test[,i] < Q[2],i] <- 'U'
+      test_cat[test[,i] >= Q[2],i] <- 'N'
+      test_cat[test[,i] > Q[4],i] <- 'O'
+    }
+    
+    train_G <- train_cat
+    test_G <- test_cat
+    train_G$Progression <- as.factor(train_G$Progression)
+    test_G$Progression <- as.factor(test_G$Progression)
+    train_G <- train_G[,c(G_rank$gene[1:5],'Progression')]
+    test_G <- test_G[,c(G_rank$gene[1:5],'Progression')]
+    #random forest
+    rf <- randomForest::randomForest(Progression~., data=train_G)
+    predictions <- as.data.frame(predict(rf, test_G, type = "prob"))
+    predictions_G <- predictions$Progression
+    
+    
+    
+    
+    predictions <- predictions_W
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.79)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    W_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    W_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    plot(precrec_obj)
+    
+    predictions <- predictions_G
+    label <- as.numeric(test_G$Progression)-1
+    precrec_obj <- precrec::evalmod(scores = predictions, labels = label)
+    t1 <- which(precrec_obj$rocs[[1]]$y > 0.79)
+    t2 <- which(precrec_obj$rocs[[1]]$y < 0.95)
+    t <- intersect(t1,t2)
+    G_spec80 <- 1 - min(precrec_obj$rocs[[1]]$x[t])
+    G_auc <- attr(precrec_obj$rocs[[1]],'auc')
+    plot(precrec_obj)
+    add <- data.frame(G_spec80, G_auc, W_spec80, W_auc)
+    Eval5 <- rbind.data.frame(Eval5, add)
+    
+    print(cycle)
+  }, error = function(e) e)
+  #traintest
+}
+
+```
+eval 
+```{r}
+meanEval5 <- c()
+for(i in colnames(Eval5)){
+  meanEval5 <- c(meanEval5, sd(Eval5[,i]))
+}
+names(meanEval5) <- colnames(Eval5)
+```
+
+heat map 
+```{r}
+dt_prog <- dt%>%filter(Progression == 'Progression')
+dt_non_prog <- dt%>%filter(Progression == 'NoProgression')
+dt <- rbind.data.frame(dt_prog, dt_non_prog)
+Wheat_prog <- dt_prog[,'ZNF652']
+Wheat_non_prog <- dt_non_prog[,'ZNF652']
+
+Wheat_prog <- t(Wheat_prog)
+prog_mean <- c()
+for(i in 1:nrow(Wheat_prog)){
+  prog_mean <- c(prog_mean,mean(Wheat_prog[i,]))
+}
+Wheat_prog <- cbind.data.frame(Wheat_prog, mean= prog_mean)
+Wheat_prog <- Wheat_prog%>%arrange(mean)
+Wheat_prog$mean <- 5
+Wheat_non_prog <- t(Wheat_non_prog)
+Wheat_non_prog <- Wheat_non_prog[rownames(Wheat_prog),]
+
+Wheat <- cbind.data.frame(Wheat_prog, Wheat_non_prog)
+
+gplots::heatmap.2(as.matrix(Wheat),dendrogram='none', Rowv=FALSE, Colv=FALSE,trace='none')
+image(as.matrix(Wheat), useRaster=TRUE, axes=FALSE)
+```
+
